@@ -21,10 +21,20 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import plotly.io as pio
+from pathlib import Path
+from PIL import Image
+
+# === 로고 경로 ===
+ASSETS_DIR = Path(__file__).parent / "assets"
+LOGO_PATH = ASSETS_DIR / "R2_logo.png"
 
 # ======== 다크 테마 기본값 ========
 pio.templates.default = "plotly_dark"
-st.set_page_config(page_title="RiskDash", layout="wide")
+st.set_page_config(
+    page_title="RiskDash",
+    layout="wide",
+    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else None  # 브라우저 탭 아이콘
+)
 
 # ======== (전역) 다크 스타일 + AgGrid 폰트 확대 CSS 주입 ========
 def inject_global_css():
@@ -215,19 +225,48 @@ def series_to_pct(s: pd.Series) -> pd.Series:
     return y.round(4)
 
 # -----------------------------
-# 상단 타이틀 & 글로벌 컨트롤바
+# 상단 타이틀 & 글로벌 컨트롤바  (로고 포함 헤더)
 # -----------------------------
-st.title("📊 RiskDash")
-cl, cr = st.columns([1, 3])
-with cl:
-    if st.button("🔄 데이터 새로고침", use_container_width=True):
-        try: read_df.clear()
-        except Exception: pass
-        try: st.cache_data.clear()
-        except Exception: pass
-        _rerun()
-with cr:
-    st.caption("KOSPI/KOSDAQ · PD(EWMA) · 업종평균 · 외국인 · 인덱스 · FinBERT · Gemini")
+def render_topbar():
+    # 헤더 스타일 (다크)
+    st.markdown("""
+    <style>
+      .topbar { display:flex; align-items:center; gap:14px; margin-bottom:8px; }
+      .topbar .title { font-size:28px; font-weight:800; margin:0; color:#e6e6e6; }
+      .topbar .sub { color:#9aa4b2; margin:2px 0 0 0; }
+      .topbar .btn-wrap { margin-left:auto; min-width:220px; }
+      .topbar img { border-radius:10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([0.13, 0.62, 0.25], gap="small")
+
+    with c1:
+        if LOGO_PATH.exists():
+            st.image(str(LOGO_PATH), use_container_width=True)
+        else:
+            st.write("")  # 로고 없을 때 자리만 차지
+
+    with c2:
+        st.markdown("<div class='topbar'>"
+                    "<div>"
+                    "<div class='title'>📊 RiskDash</div>"
+                    "<div class='sub'>KOSPI/KOSDAQ · PD(EWMA) · 업종평균 · 외국인 · 인덱스 · FinBERT · Gemini</div>"
+                    "</div>"
+                    "</div>", unsafe_allow_html=True)
+
+    with c3:
+        st.markdown("<div class='btn-wrap'></div>", unsafe_allow_html=True)
+        if st.button("🔄 데이터 새로고침", use_container_width=True):
+            try: read_df.clear()
+            except Exception: pass
+            try: st.cache_data.clear()
+            except Exception: pass
+            _rerun()
+
+# 호출
+render_topbar()
+st.divider()
 
 # -----------------------------
 # 페이지 선택
@@ -268,6 +307,12 @@ else:
 # -----------------------------
 # 사이드바 — 전역 필터
 # -----------------------------
+
+with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+    st.header("전역 필터")
+
 st.sidebar.header("전역 필터")
 markets = sorted(companies["market"].dropna().unique().tolist()) if not companies.empty else []
 sel_markets = st.sidebar.multiselect("시장", markets, default=markets)
