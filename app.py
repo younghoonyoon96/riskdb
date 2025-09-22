@@ -2,25 +2,9 @@
 """
 RiskDash — 멀티페이지 구성 (기업/업종/외국인 · 인덱스 · FinBERT · LLM 요약+채팅)
 
-스키마(v3) 가정:
-  companies(ticker, company_name, market, ksic_mid_code, ksic_mid_name)
-  pd_daily(date, ticker, pd_raw_avg, pd_raw_avg_ewma, pd_raw_avg_kalman)
-  foreign_holdings_daily(date, ticker, foreign_ratio, foreign_shares)
-  v_foreign_flows_daily(date, ticker, company_name, market, ksic_mid_code, ksic_mid_name,
-                        foreign_ratio, foreign_shares, delta_shares, delta_ratio, flow_label)
-  market_index_daily(date, index_name, close, return)
-  mv_industry_pd_daily(date, ksic_mid_code, ksic_mid_name, industry_pd_avg)
-  finbert_index_daily(date, finbert_net_sentiment, finbert_expected_value, finbert_pos_ratio)
-  finbert_news_titles(date, title, predicted_sentiment)
-  v_finbert_daily_counts(date, n_pos, n_neu, n_neg)
-
-실행 전 준비:
-  1) DATABASE_URL 설정 (환경변수 또는 RiskDash/.streamlit/secrets.toml)
-  2) (선택) Gemini API 키: GEMINI_API_KEY, GEMINI_MODEL
-
-필요 라이브러리:
-  streamlit, sqlalchemy, pandas, numpy, plotly, st-aggrid, wordcloud, matplotlib
-  (선택) google-genai, pydantic
+주요 수정:
+- AG Grid(기사수 표) 폰트/행높이/컬럼폭 확대 + 다크테마 고정(balham-dark)
+- 워드클라우드 한글 폰트 자동탐지 후 font_path 적용 (깨짐 해결)
 """
 
 from __future__ import annotations
@@ -36,6 +20,49 @@ from sqlalchemy import create_engine, text
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+import plotly.io as pio
+
+# ======== 다크 테마 기본값 ========
+pio.templates.default = "plotly_dark"
+st.set_page_config(page_title="RiskDash", layout="wide")
+
+# ======== (전역) 다크 스타일 + AgGrid 폰트 확대 CSS 주입 ========
+def inject_global_css():
+    st.markdown(
+        """
+        <style>
+          /* 페이지 베이스 톤(다크) */
+          .stApp { background-color: #0f1116; }
+          .stMarkdown, .stText, .stCaption, .stCode, .stHeader { color: #e6e6e6; }
+
+          /* AG Grid 다크 테마 폰트/행 높이/여백 */
+          .ag-theme-balham-dark {
+            --ag-foreground-color: #e6e6e6;
+            --ag-background-color: #141821;
+            --ag-header-foreground-color: #e6e6e6;
+            --ag-header-background-color: #1b2030;
+            --ag-odd-row-background-color: #141821;
+            --ag-row-hover-color: #1f2635;
+            font-size: 15px;              /* ← 숫자 작게 보이는 문제 개선 */
+          }
+          .ag-theme-balham-dark .ag-header-cell {
+            font-weight: 700;
+            font-size: 15px;
+          }
+          .ag-theme-balham-dark .ag-cell {
+            line-height: 1.4;
+            padding-top: 6px;
+            padding-bottom: 6px;
+          }
+
+          /* 표 컨테이너 여백 */
+          .block-container { padding-top: 1.2rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+inject_global_css()
 
 # -----------------------------
 # (선택) Gemini — 없으면 해당 페이지에서 안내만 표시
@@ -44,15 +71,10 @@ try:
     from google import genai
     from google.genai import types as gtypes
     from pydantic import BaseModel
-except Exception:  # 패키지 미설치 시, LLM 페이지에서 안내
+except Exception:
     genai = None
     gtypes = None
     BaseModel = None
-
-# -----------------------------
-# 페이지 설정 (최상단에서 1회)
-# -----------------------------
-st.set_page_config(page_title="RiskDash", layout="wide")
 
 # -----------------------------
 # 공용 유틸/캐시
@@ -76,18 +98,15 @@ def get_engine():
 
 @st.cache_data(ttl=120)
 def read_df(sql: str, params: dict | None = None) -> pd.DataFrame:
-    """SQL → DataFrame (캐시)"""
     eng = get_engine()
     with eng.connect() as conn:
         return pd.read_sql_query(text(sql), conn, params=params or {})
 
 def fmt_company(ticker: str, name_map: dict[str, str]) -> str:
-    """표시용: '회사명 (티커)' 또는 티커만"""
     nm = name_map.get(ticker)
     return f"{nm} ({ticker})" if nm and nm != ticker else ticker
 
 def _rerun():
-    """Streamlit 버전별 rerun 헬퍼"""
     if hasattr(st, "rerun"): st.rerun()
     elif hasattr(st, "experimental_rerun"): st.experimental_rerun()
 
@@ -95,12 +114,13 @@ def _rerun():
 # 워드클라우드/한국어 처리 유틸
 # -----------------------------
 def _get_korean_font_path() -> str | None:
-    # macOS, Windows, Linux 후보
+    # macOS / Windows / Linux 후보
     cands = [
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-        "C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/malgunbd.ttf",
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",                 # macOS
+        "C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/malgunbd.ttf",  # Windows
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",            # Ubuntu (nanum)
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",     # Noto CJK
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     ]
     for p in cands:
         if os.path.exists(p):
@@ -108,10 +128,10 @@ def _get_korean_font_path() -> str | None:
     return None
 
 _KR_FONT = _get_korean_font_path()
-_DEFAULT_STOPS = set(["기사","속보","단독","종합","영상","포토","외","…","무"])  # 아주 기초 불용어
+
+_DEFAULT_STOPS = set(["기사","속보","단독","종합","영상","포토","외","…","무"])
 
 def simple_tokenize_korean(titles: list[str]) -> str:
-    """아주 단순 토큰화 (제목 기반)"""
     import re
     tokens = []
     for t in titles:
@@ -125,11 +145,7 @@ def simple_tokenize_korean(titles: list[str]) -> str:
     return " ".join(tokens)
 
 def render_wordcloud(titles: list[str], sentiment: str):
-    """감성별 색상으로 워드클라우드 렌더
-    - positive: 초록(#2ecc71) on white
-    - negative: 빨강(#e74c3c) on white
-    - neutral:  흰색 on 어두운 배경
-    """
+    """다크테마에 맞춘 색 + 한글 폰트 고정"""
     color_map = {
         "positive": ("#2ecc71", "white"),
         "negative": ("#e74c3c", "white"),
@@ -142,12 +158,16 @@ def render_wordcloud(titles: list[str], sentiment: str):
 
     text = simple_tokenize_korean(titles)
     wc = WordCloud(
-        width=800, height=400, background_color=bg_color,
-        font_path=_KR_FONT, regexp=r"[A-Za-z가-힣0-9]+"
+        width=1100, height=550, background_color=bg_color,
+        font_path=_KR_FONT,              # ★ 한글 폰트 지정 (없으면 None → 경고)
+        regexp=r"[A-Za-z가-힣0-9]+"
     ).generate(text)
     wc.recolor(color_func=mono_color_func)
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    if _KR_FONT is None:
+        st.warning("서버에서 한글 폰트를 찾지 못했습니다. 워드클라우드가 깨지면 `sudo apt-get install fonts-nanum` 후 재실행 하세요.", icon="⚠️")
+
+    fig, ax = plt.subplots(figsize=(11, 5.5))
     ax.imshow(wc, interpolation="bilinear")
     ax.axis("off")
     st.pyplot(fig, use_container_width=True)
@@ -157,7 +177,6 @@ def render_wordcloud(titles: list[str], sentiment: str):
 # PD 단위/스무딩 유틸
 # -----------------------------
 def pd_scale(df: pd.DataFrame, cols: list[str], unit: str, smooth_n: int) -> pd.DataFrame:
-    """PD 값 단위(bp/% ) 변환 + 이동평균 스무딩"""
     x = df.sort_values("date").copy()
     factor = 10_000.0 if unit.startswith("bp") else 100.0
     for c in cols:
@@ -166,54 +185,33 @@ def pd_scale(df: pd.DataFrame, cols: list[str], unit: str, smooth_n: int) -> pd.
     return x
 
 # -----------------------------
-# 🔧 외국인 보유비율 스케일 정규화 유틸 (핵심 수정)
+# 외국인 보유비율 정규화 유틸
 # -----------------------------
 def normalize_ratio_to_pct(x) -> float | None:
-    """
-    단일 값 x를 '퍼센트(0~100)'로 안전하게 정규화.
-    - 0~1   → *100
-    - 1~100 → 그대로
-    - 100~10000 → /100  (간혹 100배 스케일로 저장된 경우)
-    그 외 값은 그대로 반환
-    """
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
     try:
         v = float(x)
     except Exception:
         return None
-
     if v < 0:
         return None
-    if v <= 1.0:
-        return round(v * 100.0, 4)
-    if v <= 100.0:
-        return round(v, 4)
-    if v <= 10000.0:
-        return round(v / 100.0, 4)
+    if v <= 1.0:      return round(v * 100.0, 4)
+    if v <= 100.0:    return round(v, 4)
+    if v <= 10000.0:  return round(v / 100.0, 4)
     return round(v, 4)
 
 def series_to_pct(s: pd.Series) -> pd.Series:
-    """
-    시리즈 전체 스케일을 보고 일괄 정규화(그래프용).
-    - 분포의 90%분위를 기준으로 스케일 추정
-    """
     x = pd.to_numeric(s, errors="coerce")
     if x.dropna().empty:
         return x
-
     ref = x.dropna().quantile(0.9)
     if not np.isfinite(ref):
         ref = x.dropna().max()
-
-    if ref <= 1.5:
-        y = x * 100.0
-    elif ref <= 100.0:
-        y = x
-    elif ref <= 10000.0:
-        y = x / 100.0
-    else:
-        y = x
+    if ref <= 1.5:        y = x * 100.0
+    elif ref <= 100.0:    y = x
+    elif ref <= 10000.0:  y = x / 100.0
+    else:                 y = x
     return y.round(4)
 
 # -----------------------------
@@ -232,7 +230,7 @@ with cr:
     st.caption("KOSPI/KOSDAQ · PD(EWMA) · 업종평균 · 외국인 · 인덱스 · FinBERT · Gemini")
 
 # -----------------------------
-# (본문 상단) 페이지 선택 UI
+# 페이지 선택
 # -----------------------------
 st.markdown("### 🔎 섹션 선택")
 if "page" not in st.session_state:
@@ -250,7 +248,7 @@ st.session_state["page"] = page
 st.divider()
 
 # -----------------------------
-# 기초 메타 로드 (회사/기간 범위)
+# 메타 로드 (회사/기간 범위)
 # -----------------------------
 companies = read_df("""
     SELECT ticker, company_name, market, ksic_mid_code, ksic_mid_name
@@ -268,15 +266,12 @@ else:
     default_start = default_end - timedelta(days=180)
 
 # -----------------------------
-# 사이드바 — 전역 필터 & 옵션 (시장/종목/기간 등)
+# 사이드바 — 전역 필터
 # -----------------------------
 st.sidebar.header("전역 필터")
-
-# 시장 필터
 markets = sorted(companies["market"].dropna().unique().tolist()) if not companies.empty else []
 sel_markets = st.sidebar.multiselect("시장", markets, default=markets)
 
-# 업종 목록(코드·이름)
 comp_by_mkt = companies[companies["market"].isin(sel_markets)] if sel_markets else companies
 ind_options = (
     comp_by_mkt[["ksic_mid_code", "ksic_mid_name"]]
@@ -287,7 +282,6 @@ ind_labels = ind_options.apply(lambda r: f"{r['ksic_mid_code'] or '-'} · {r['ks
 ind_pairs = list(zip(ind_labels, ind_options["ksic_mid_code"].tolist(), ind_options["ksic_mid_name"].tolist()))
 sel_inds = st.sidebar.multiselect("업종(중분류)", options=[lab for lab, _, _ in ind_pairs], default=None)
 
-# 종목 필터
 def _filter_companies(df: pd.DataFrame) -> pd.DataFrame:
     x = df
     if sel_markets:
@@ -322,10 +316,9 @@ st.sidebar.subheader("인덱스 변동성")
 rv_window = st.sidebar.slider("RV 윈도우(일)", 10, 60, 20, 2)
 
 # -----------------------------
-# 렌더 함수들
+# 렌더: 기업/업종/외국인
 # -----------------------------
 def render_company_page():
-    """기업 PD(EWMA) · 업종 평균 · 외국인 흐름"""
     st.subheader("📈 기업 PD(EWMA) · 🏭 업종 평균 · 🌏 외국인 흐름")
 
     # 1) 기업 PD(EWMA)
@@ -357,7 +350,7 @@ def render_company_page():
 
     st.markdown("---")
 
-    # 2) 업종 평균 PD (포커스 종목 기준, 사이드바 선택시 우선)
+    # 2) 업종 평균
     focus_ind_code = None; focus_ind_name = None
     if not pdf.empty and "ksic_mid_code" in pdf.columns:
         focus_ind_code = pdf["ksic_mid_code"].iloc[0]
@@ -437,7 +430,6 @@ def render_company_page():
         else:
             c1, c2 = st.columns(2)
             with c1:
-                # 🔵 %로 스케일 정규화하여 라인 차트
                 ff_plot = ff.copy()
                 ff_plot["foreign_ratio_pct"] = series_to_pct(ff_plot["foreign_ratio"])
                 fig_fr = px.line(
@@ -450,14 +442,10 @@ def render_company_page():
                 fig_fr.update_yaxes(title="외국인 보유비율(%)")
                 st.plotly_chart(fig_fr, use_container_width=True, key="pg_cmp_fore_ratio")
             with c2:
-                # 🟦 순매수, 🟧 순매도 색상 고정
                 bars = ff.dropna(subset=["delta_shares"]).copy()
                 bars["flow"] = np.where(bars["delta_shares"] >= 0, "매수", "매도")
                 fig_fl = px.bar(
-                    bars,
-                    x="date",
-                    y="delta_shares",
-                    color="flow",
+                    bars, x="date", y="delta_shares", color="flow",
                     title="전일 대비 순매수/순매도(주)",
                     color_discrete_map={"매수": "#1f77b4", "매도": "#ff7f0e"},
                     category_orders={"flow": ["매수", "매도"]},
@@ -468,8 +456,10 @@ def render_company_page():
     else:
         st.info("종목을 선택하세요.")
 
+# -----------------------------
+# 렌더: 인덱스
+# -----------------------------
 def render_index_page():
-    """코스피/코스닥 — 수익률 & 실현변동성(RV)"""
     st.subheader("📈 코스피/코스닥 — 수익률 & 실현변동성(RV)")
     idx = read_df(
         """
@@ -484,13 +474,8 @@ def render_index_page():
         st.info("인덱스 데이터가 없습니다.")
         return
 
-    # 🔵 KOSPI, 🟧 KOSDAQ 색상 고정
     fig_ret = px.line(
-        idx,
-        x="date",
-        y="return",
-        color="index_name",
-        title="일간 수익률",
+        idx, x="date", y="return", color="index_name", title="일간 수익률",
         color_discrete_map={"KOSPI": "#1f77b4", "KOSDAQ": "#ff7f0e"},
         category_orders={"index_name": ["KOSPI", "KOSDAQ"]},
     )
@@ -504,19 +489,17 @@ def render_index_page():
         st.info("변동성 계산을 위한 데이터가 부족합니다.")
     else:
         fig_rv = px.line(
-            rv,
-            x="date",
-            y="rv",
-            color="index_name",
-            title=f"{rv_window}일 실현변동성(RV)",
+            rv, x="date", y="rv", color="index_name", title=f"{rv_window}일 실현변동성(RV)",
             color_discrete_map={"KOSPI": "#1f77b4", "KOSDAQ": "#ff7f0e"},
             category_orders={"index_name": ["KOSPI", "KOSDAQ"]},
         )
         fig_rv.update_layout(height=280, margin=dict(l=10, r=10, t=55, b=5), legend_title=None)
         st.plotly_chart(fig_rv, use_container_width=True, key="pg_idx_rv")
 
+# -----------------------------
+# 렌더: FinBERT
+# -----------------------------
 def render_finbert_page():
-    """FinBERT — 경기심리 게이지 & 기사수/워드클라우드"""
     st.subheader("📰 FinBERT — 경기심리 게이지 & 기사수/워드클라우드")
     fb = read_df(
         """
@@ -534,24 +517,21 @@ def render_finbert_page():
         st.info("해당 기간의 FinBERT 인덱스 데이터가 없습니다.")
         return
 
-    fbev = fb.dropna(subset=["finbert_expected_value"])  # 기대값 있는 행
+    fbev = fb.dropna(subset=["finbert_expected_value"])
     last = fbev.iloc[-1]
-    cur  = float(last["finbert_expected_value"])  # 최신 기대값
+    cur  = float(last["finbert_expected_value"])
     prev = float(fbev.iloc[-2]["finbert_expected_value"]) if len(fbev) >= 2 else None
 
-    # deadband(중립 범위)
     neutral_eps = 0.05
-    if cur >= neutral_eps: label = "긍정"
+    if   cur >=  neutral_eps: label = "긍정"
     elif cur <= -neutral_eps: label = "부정"
-    else: label = "중립"
+    else:                     label = "중립"
 
-    # (표 클릭값 기본 초기화: counts가 비어도 안전)
     display_date = None
     sel_dict = None
 
     col_g, col_tbl = st.columns([1.2, 1], gap="medium")
 
-    # (좌) 게이지
     with col_g:
         fig_g = go.Figure(go.Indicator(
             mode="gauge+number+delta",
@@ -574,7 +554,6 @@ def render_finbert_page():
         fig_g.update_layout(height=270, margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig_g, use_container_width=True, key=f"pg_fb_gauge_{pd.to_datetime(last['date']).date()}_{start_date}_{end_date}")
 
-    # (우) 최신일 기사수 표 + 클릭 → 워드클라우드
     with col_tbl:
         counts = read_df(
             """
@@ -604,37 +583,45 @@ def render_finbert_page():
 
             st.markdown(f"**📅 {display_date} 기사수** (행 클릭 → 워드클라우드)")
 
+            # 행 스타일: 감성별 배경
             row_style = JsCode(
                 """
                 function(params) {
-                  if (params.data.감성 === '긍정') { return { backgroundColor: '#eafaf1', fontWeight: 600 }; }
-                  else if (params.data.감성 === '부정') { return { backgroundColor: '#fdecea', fontWeight: 600 }; }
-                  else { return { backgroundColor: '#ffffff', fontWeight: 600 }; }
+                  if (params.data.감성 === '긍정') { return { backgroundColor: '#183a2a', fontWeight: 700 }; }
+                  else if (params.data.감성 === '부정') { return { backgroundColor: '#3a1a1a', fontWeight: 700 }; }
+                  else { return { backgroundColor: '#1c2230', fontWeight: 700 }; }
                 }
                 """
             )
 
             gb = GridOptionsBuilder.from_dataframe(tbl[["감성","기사수"]])
+            gb.configure_default_column(resizable=True, filter=False, sortable=False)
             gb.configure_selection(selection_mode='single', use_checkbox=False)
-            gb.configure_grid_options(getRowStyle=row_style, rowHeight=36)
-            gb.configure_columns({"감성": {"width": 100}, "기사수": {"width": 100}})
+            gb.configure_grid_options(
+                rowHeight=42, headerHeight=38,
+                suppressMovableColumns=True, getRowStyle=row_style
+            )
+            gb.configure_column("감성", width=120, cellStyle={'fontWeight': '700'})
+            gb.configure_column("기사수", width=140, type=["numericColumn"],
+                                cellStyle={'fontWeight': '800', 'textAlign': 'right'})
+
             grid = AgGrid(
                 tbl[["감성","기사수"]],
                 gridOptions=gb.build(),
                 update_mode=GridUpdateMode.SELECTION_CHANGED,
-                fit_columns_on_grid_load=True,
+                fit_columns_on_grid_load=True,     # ← 자동 폭 맞춤
                 allow_unsafe_jscode=True,
-                height=150,
-                theme="streamlit",
+                height=170,
+                theme="balham-dark",               # ← 다크 테마
                 key=f"pg_fb_counts_{display_date}",
             )
+
             selected_row = grid.get("selected_rows", None)
             if isinstance(selected_row, list) and len(selected_row) > 0:
                 sel_dict = selected_row[0]
             elif isinstance(selected_row, pd.DataFrame) and not selected_row.empty:
                 sel_dict = selected_row.iloc[0].to_dict()
 
-    # 표 클릭 시 워드클라우드
     if display_date and (sel_dict is not None):
         sel_label = sel_dict.get("감성")
         label2sent = {"긍정": "positive", "중립": "neutral", "부정": "negative"}
@@ -656,7 +643,7 @@ def render_finbert_page():
         st.caption("표에서 **행을 클릭**하면 워드클라우드가 표시됩니다.")
 
 # -----------------------------
-# (선택) Gemini 연동 — 요약(구조화) + 채팅
+# (선택) Gemini 연동 — 요약 + 채팅
 # -----------------------------
 if BaseModel is not None:
     class Opinion(BaseModel):
@@ -664,8 +651,8 @@ if BaseModel is not None:
         name: str
         market: str
         period: str
-        stance: str            # "매수" | "중립" | "매도"
-        confidence: float      # 0~1
+        stance: str
+        confidence: float
         summary: str
         reasons: list[str]
         risks: list[str]
@@ -676,7 +663,6 @@ else:
 
 @st.cache_resource
 def get_gemini_client():
-    """Gemini 클라이언트 생성 (키 없으면 None)"""
     if genai is None:
         return None
     key = (getattr(st, "secrets", {}).get("GEMINI_API_KEY") if hasattr(st, "secrets") else None) or os.getenv("GEMINI_API_KEY")
@@ -689,36 +675,24 @@ def get_gemini_client():
 
 GEMINI_MODEL = (getattr(st, "secrets", {}).get("GEMINI_MODEL") if hasattr(st, "secrets") else None) or "gemini-2.5-flash"
 
-# --- 요약(Structured) 전용 시스템 프롬프트: 우리 DB 숫자만 활용 ---
 SYS_PROMPT = (
     "너는 한국 주식시장의 데이터 기반 리서치 어시스턴트다. "
     "주어진 수치(PD[bp,%], 업종 평균, 외국인 매수/매도 흐름, 인덱스 변동성, FinBERT 기대값)만 근거로 "
-    "과장 없이 간결한 '관찰 중심' 의견을 제시해라. "
-    "개인 맞춤형 투자 조언은 하지마라. "
-    "단위 규칙: foreign_ratio는 0~1의 비율이다. 퍼센트로 말할 때는 100을 곱하고 '%'를 붙여라. "
-    "절대 bp(베이시스포인트)로 표현하지 마라."
+    "관찰 중심 의견을 제시해라. 개인 맞춤형 조언은 금지. "
+    "foreign_ratio는 0~1 비율 → 퍼센트로 말할 땐 100을 곱해 '%'를 붙인다. bp로 표현 금지."
 )
 
-# --- 채팅(Open-domain) 전용 시스템 프롬프트: 외부 지식/검색 허용 ---
 CHAT_SYS_PROMPT = (
-    "너는 금융 교육용 어시스턴트다. 사용자의 질문에 대해 공개 지식과 일반적인 금융 상식, "
-    "최근 공시/뉴스/리서치(검색이 켜진 경우)에 근거해 설명해라. "
-    "우리 대시보드(DB) 숫자는 참고 정보일 뿐이며, 질문이 개념/기업개요/매크로 동향 등 일반 지식일 때는 "
-    "DB 숫자에 얽매이지 말고 넓은 배경지식을 활용해라. "
-    "단, DB 숫자를 언급할 땐 foreign_ratio가 0~1 비율(예: 0.55=55%)임을 기억하고, 퍼센트로 말할 때 100을 곱해라. "
-    "절대 bp로 표현하지 마라. "
-    "가능하면 쉬운 용어와 짧은 문단으로 답하고, 필요한 경우 간단한 예시와 비교를 들어라."
+    "너는 금융 교육용 어시스턴트다. 공개 지식/일반 상식(+검색 사용 시 외부자료)을 바탕으로 답하라. "
+    "DB 수치는 참고일 뿐. foreign_ratio는 0~1 비율(0.55=55%). 퍼센트 표기만, bp 금지. "
+    "쉽고 간결하게 답하라."
 )
 
 def _load_context_for_llm(ticker: str, s: date, e: date) -> dict:
-    """DB → LLM 컨텍스트 요약 (외국인 비율 % 정규화 반영)"""
-    # 기업 메타
     meta = read_df("SELECT ticker, company_name, market, ksic_mid_code, ksic_mid_name FROM companies WHERE ticker = :t", {"t": ticker})
     if meta.empty:
         return {}
     m = meta.iloc[0]
-
-    # PD(EWMA)
     pddf = read_df("""
         SELECT date::date AS date, pd_raw_avg_ewma
         FROM pd_daily
@@ -731,8 +705,6 @@ def _load_context_for_llm(ticker: str, s: date, e: date) -> dict:
         if not srs.empty:
             last = float(srs.iloc[-1]); base_idx = max(0, len(srs) - 31); base = float(srs.iloc[base_idx])
             pd_ctx = {"last_pd_ewma_bp": round(last * 10_000, 2), "delta_30d_bp": round((last - base) * 10_000, 2)}
-
-    # 업종 평균 PD
     ind_ctx = {}
     if pd.notna(m["ksic_mid_code"]):
         ind = read_df("""
@@ -744,8 +716,6 @@ def _load_context_for_llm(ticker: str, s: date, e: date) -> dict:
         srs = pd.to_numeric(ind.get("industry_pd_avg", pd.Series(dtype=float)), errors="coerce").dropna()
         if not srs.empty:
             ind_ctx = {"industry_last_bp": round(float(srs.iloc[-1]) * 10_000, 2)}
-
-    # 외국인 보유/플로우
     flows = read_df("""
         SELECT date::date AS date, foreign_ratio::float AS fr, foreign_shares::float AS fs
         FROM foreign_holdings_daily
@@ -755,18 +725,13 @@ def _load_context_for_llm(ticker: str, s: date, e: date) -> dict:
     flow_ctx = {}
     if not flows.empty:
         flows["delta_shares"] = pd.to_numeric(flows["fs"], errors="coerce").diff()
-        flows["delta_ratio"]  = pd.to_numeric(flows["fr"], errors="coerce").diff()
-
         fr_last_series = pd.to_numeric(flows["fr"], errors="coerce").dropna()
         fr_last_pct = normalize_ratio_to_pct(fr_last_series.iloc[-1]) if not fr_last_series.empty else None
-
         flow_ctx = {
             "foreign_ratio_last_pct": fr_last_pct,
             "net_flow_5d_shares": int(pd.to_numeric(flows["delta_shares"], errors="coerce").dropna().tail(5).sum())
                 if pd.to_numeric(flows["delta_shares"], errors="coerce").dropna().size else None,
         }
-
-    # 인덱스 RV 요약
     idx = read_df("""
         SELECT date::date AS date, index_name, return::float AS ret
         FROM market_index_daily
@@ -783,8 +748,6 @@ def _load_context_for_llm(ticker: str, s: date, e: date) -> dict:
             kosdaq = sub.loc[sub["index_name"] == "KOSDAQ", "rv20"].mean()
             idx_ctx = {"rv20_kospi": round(float(kospi), 4) if pd.notna(kospi) else None,
                        "rv20_kosdaq": round(float(kosdaq), 4) if pd.notna(kosdaq) else None}
-
-    # FinBERT EV
     fb = read_df("""
         SELECT finbert_expected_value::float AS ev
         FROM finbert_index_daily
@@ -792,23 +755,14 @@ def _load_context_for_llm(ticker: str, s: date, e: date) -> dict:
         ORDER BY date
     """, {"s": s, "e": e})
     fb_ctx = {"finbert_ev_last": round(float(fb["ev"].dropna().iloc[-1]), 3)} if (not fb.empty and fb["ev"].dropna().size) else {}
-
     return {
-        "ticker": m["ticker"],
-        "name": m["company_name"],
-        "market": m["market"],
-        "industry_code": m["ksic_mid_code"],
-        "industry_name": m["ksic_mid_name"],
-        "period": f"{s} ~ {e}",
-        "pd": pd_ctx,
-        "industry_pd": ind_ctx,
-        "foreign": flow_ctx,
-        "index": idx_ctx,
-        "finbert": fb_ctx,
+        "ticker": m["ticker"], "name": m["company_name"], "market": m["market"],
+        "industry_code": m["ksic_mid_code"], "industry_name": m["ksic_mid_name"],
+        "period": f"{s} ~ {e}", "pd": pd_ctx, "industry_pd": ind_ctx,
+        "foreign": flow_ctx, "index": idx_ctx, "finbert": fb_ctx,
     }
 
 def _format_ctx_for_chat(ctx: dict) -> str:
-    """채팅/프롬프트에 넣을 간단 컨텍스트 문자열 (단위 명시)"""
     pd_last = ctx.get("pd", {}).get("last_pd_ewma_bp")
     pd_delta = ctx.get("pd", {}).get("delta_30d_bp")
     ind_last = ctx.get("industry_pd", {}).get("industry_last_bp")
@@ -826,26 +780,19 @@ def _format_ctx_for_chat(ctx: dict) -> str:
     )
 
 def render_llm_page():
-    """Gemini — 투자 종합의견(요약: 내부데이터만) + 오픈도메인 채팅(외부지식/검색)"""
     st.subheader("🤖 Gemini — 투자 종합의견 & 질의응답")
 
-    # 패키지가 없거나 스키마가 없으면 안내 후 종료
     if genai is None or gtypes is None or Opinion is None:
-        st.warning("google-genai / pydantic 패키지가 필요합니다. 설치 후 페이지를 새로고침하세요.")
+        st.warning("google-genai / pydantic 패키지가 필요합니다. 설치 후 새로고침하세요.")
         st.code("pip install -U google-genai pydantic", language="bash")
         return
 
-    # 세션 상태
-    if "gemini_opinion" not in st.session_state:
-        st.session_state["gemini_opinion"] = None
-    if "gemini_ctx_sig" not in st.session_state:
-        st.session_state["gemini_ctx_sig"] = None
-    if "chat_messages" not in st.session_state:
-        st.session_state["chat_messages"] = []  # [{'role': 'user'|'assistant', 'content': '...'}]
+    if "gemini_opinion" not in st.session_state: st.session_state["gemini_opinion"] = None
+    if "gemini_ctx_sig" not in st.session_state: st.session_state["gemini_ctx_sig"] = None
+    if "chat_messages" not in st.session_state: st.session_state["chat_messages"] = []
 
     ctx_sig = (str(focus_ticker or ""), str(start_date), str(end_date))
 
-    # ==============  A. 요약(내부데이터 기반)  ==============
     st.markdown("### 📌 요약(내부 데이터 기반)")
     c_left, c_right = st.columns([1, 2])
     with c_left:
@@ -865,15 +812,12 @@ def render_llm_page():
             st.warning("GEMINI_API_KEY가 설정되지 않았거나 클라이언트 생성 실패.")
             return
         if not focus_ticker:
-            st.info("종목을 먼저 선택하세요.")
-            return
+            st.info("종목을 먼저 선택하세요."); return
 
         ctx = _load_context_for_llm(focus_ticker, start_date, end_date)
         if not ctx:
-            st.info("컨텍스트가 비어 있습니다. 기간/데이터를 확인하세요.")
-            return
+            st.info("컨텍스트가 비었습니다. 기간/데이터를 확인하세요."); return
 
-        # 내부데이터만 전달 (외부지식/검색 불가)
         user_prompt = (
             f"[종목] {ctx['name']} ({ctx['ticker']}, {ctx['market']})\n"
             f"[기간] {ctx['period']}\n"
@@ -884,7 +828,7 @@ def render_llm_page():
             "foreign_ratio는 퍼센트(%)로만 표기하고 절대 bp로 표기하지 말라."
         )
 
-        with st.spinner("Gemini가 요약을 생성 중… (버튼 클릭 시에만 호출)"):
+        with st.spinner("Gemini가 요약을 생성 중…"):
             try:
                 resp = cli.models.generate_content(
                     model=GEMINI_MODEL,
@@ -898,10 +842,7 @@ def render_llm_page():
                     ),
                 )
                 op = resp.parsed
-                op_dict = (
-                    op.model_dump() if hasattr(op, "model_dump")
-                    else (op.dict() if hasattr(op, "dict") else None)
-                )
+                op_dict = op.model_dump() if hasattr(op, "model_dump") else (op.dict() if hasattr(op, "dict") else None)
                 st.session_state["gemini_opinion"] = op_dict
                 st.session_state["gemini_ctx_sig"] = ctx_sig
             except Exception as e:
@@ -911,31 +852,26 @@ def render_llm_page():
         op_data = st.session_state.get("gemini_opinion")
         created_sig = st.session_state.get("gemini_ctx_sig")
         if op_data and created_sig != ctx_sig:
-            st.info("기간/종목이 변경되었습니다. 아래 결과는 이전 컨텍스트 기준입니다. 갱신하려면 **[요약 생성]**을 다시 눌러주세요.")
+            st.info("기간/종목이 변경되었습니다. 아래 결과는 이전 컨텍스트 기준입니다. [요약 생성]을 다시 눌러 갱신하세요.")
         if not op_data:
-            st.caption("아직 요약을 생성하지 않았습니다. **[요약 생성]** 버튼을 눌러 만들어보세요.")
+            st.caption("아직 요약을 생성하지 않았습니다. [요약 생성] 버튼을 눌러 만들어보세요.")
         else:
             stance = op_data.get("stance", "중립"); conf = op_data.get("confidence", 0.0)
             stance_color = {"매수": "green", "중립": "gray", "매도": "red"}.get(stance, "gray")
-            st.markdown(
-                f"### 🎯 종합의견: <span style='color:{stance_color}'>{stance}</span> (신뢰도 {conf:.0%})",
-                unsafe_allow_html=True,
-            )
+            st.markdown(f"### 🎯 종합의견: <span style='color:{stance_color}'>{stance}</span> (신뢰도 {conf:.0%})", unsafe_allow_html=True)
             st.markdown(f"**요약**: {op_data.get('summary','')}")
             cA, cB = st.columns(2)
             with cA:
                 st.markdown("#### ✅ 근거")
-                for r in (op_data.get("reasons") or []):
-                    st.markdown(f"- {r}")
+                for r in (op_data.get("reasons") or []): st.markdown(f"- {r}")
             with cB:
                 st.markdown("#### ⚠️ 리스크")
-                for r in (op_data.get("risks") or []):
-                    st.markdown(f"- {r}")
+                for r in (op_data.get("risks") or []): st.markdown(f"- {r}")
             st.caption("※ 본 내용은 정보 제공 목적이며 투자 권유가 아닙니다.")
 
     st.divider()
 
-    # ==============  B. 오픈도메인 채팅(외부지식/검색 허용)  ==============
+    # ---- 채팅
     st.markdown("### 💬 챗봇")
     chat_cols = st.columns([1, 2.2, 1])
     with chat_cols[0]:
@@ -947,7 +883,6 @@ def render_llm_page():
             try: st.rerun()
             except Exception: pass
 
-    # 대표 질문 예시 (클릭 시 즉시 전송)
     st.caption("예시 질문:")
     ex1, ex2, ex3, ex4 = st.columns(4)
     if ex1.button("외국인 순매수/순매도가 지수에 주는 영향은?"):
@@ -959,30 +894,21 @@ def render_llm_page():
     if ex4.button("KOSDAQ과 KOSPI의 차이?"):
         st.session_state["chat_messages"].append({"role": "user", "content": "KOSDAQ과 KOSPI의 차이(상장 요건, 업종 구성, 변동성)를 초보자도 이해하기 쉽게 알려줘."})
 
-    # 채팅 히스토리 렌더
     for m in st.session_state["chat_messages"]:
         st.chat_message(m["role"]).markdown(m["content"])
 
-    # 입력창
     user_msg = st.chat_input("질문을 입력하세요…")
     if user_msg:
         st.session_state["chat_messages"].append({"role": "user", "content": user_msg})
 
-    # 마지막이 user면 응답 생성
     if len(st.session_state["chat_messages"]) and st.session_state["chat_messages"][-1]["role"] == "user":
         last_user = st.session_state["chat_messages"][-1]["content"]
         cli = get_gemini_client()
         if cli is None:
             st.warning("GEMINI_API_KEY가 설정되지 않았거나 클라이언트 생성 실패.")
             return
-
-        # 현재 화면 컨텍스트(간단 요약)는 '참고'로만 전달
         ctx = _load_context_for_llm(focus_ticker, start_date, end_date) if focus_ticker else None
-
-        # 툴(검색) 설정
         tools = [gtypes.Tool(google_search=gtypes.GoogleSearch())] if use_search else None
-
-        # 채팅용 프롬프트 구성
         ctx_line = ""
         if ctx:
             ctx_line = (
@@ -991,17 +917,13 @@ def render_llm_page():
                 f"외국인 보유비율 {ctx['foreign'].get('foreign_ratio_last_pct')}%, "
                 f"FinBERT EV {ctx['finbert'].get('finbert_ev_last')}."
             )
-
         full_prompt = (
-            f"{CHAT_SYS_PROMPT}\n\n"
-            f"{ctx_line}\n\n"
-            f"사용자 질문: {last_user}\n\n"
+            f"{CHAT_SYS_PROMPT}\n\n{ctx_line}\n\n사용자 질문: {last_user}\n\n"
             "응답 규칙:\n"
             "- 개념/기업/매크로 질문은 공개 지식 위주로 설명하고 필요한 경우 우리 DB는 참고 수치로만 인용\n"
             "- 수치 언급 시 단위 명시(PD=bp, 외국인 보유비율=%), foreign_ratio는 절대 bp로 말하지 말 것\n"
             "- 초보자도 이해하기 쉽게 간결하게 답변\n"
         )
-
         with st.spinner("답변 생성 중…"):
             try:
                 resp = cli.models.generate_content(
@@ -1009,7 +931,7 @@ def render_llm_page():
                     contents=full_prompt,
                     config=gtypes.GenerateContentConfig(
                         temperature=float(st.session_state.get("chat_temp", 0.3)),
-                        tools=tools,                 # ← 검색 허용 시 도구 활성화
+                        tools=tools,
                         max_output_tokens=1024,
                     ),
                 )

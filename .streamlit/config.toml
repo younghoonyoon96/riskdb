@@ -1,0 +1,14 @@
+[theme]
+base = "dark"                    # "light" | "dark"
+primaryColor = "#1f77b4"         # 앱 포인트 컬러 (KOSPI 파랑과 맞춤)
+backgroundColor = "#0E1117"      # 전체 배경
+secondaryBackgroundColor = "#262730"  # 카드/위젯 배경
+textColor = "#FAFAFA"            # 텍스트
+font = "sans serif"
+
+[server]
+port = 8501
+address = "127.0.0.1"
+headless = true
+enableCORS = true          # 기본값 true지만 명시해줍니다
+enableXsrfProtection = false
