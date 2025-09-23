@@ -180,7 +180,7 @@ def render_wordcloud(titles: list[str], sentiment: str):
     fig, ax = plt.subplots(figsize=(11, 5.5))
     ax.imshow(wc, interpolation="bilinear")
     ax.axis("off")
-    st.pyplot(fig, width='content')
+    st.pyplot(fig, use_container_width=True)
     plt.close(fig)
 
 # -----------------------------
